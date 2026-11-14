@@ -1,0 +1,16 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Credenciais locais e arquivos coletados
+.env
+.env.*
+/data/acervo/
+.DS_Store

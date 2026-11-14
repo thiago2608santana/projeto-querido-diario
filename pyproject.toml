@@ -1,0 +1,33 @@
+[project]
+name = "projeto-querido-diario"
+version = "0.1.0"
+description = "Pipeline de documentos do Querido Diário com Neon e Pinecone"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "boto3>=1.44.1",
+    "docling",
+    "httpx",
+    "ollama",
+    "openai",
+    "pinecone",
+    "psycopg[binary]",
+    "python-dotenv",
+    "sentence-transformers",
+    "sqlalchemy>=2.1.8",
+    "transformers",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel",
+    "matplotlib",
+    "mlxtend",
+    "numpy",
+    "pandas",
+    "plotly",
+    "scikit-learn",
+    "scipy",
+    "seaborn",
+    "statsmodels",
+]
