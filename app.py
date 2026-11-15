@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from threading import Lock
 from zoneinfo import ZoneInfo
@@ -14,6 +14,9 @@ from zoneinfo import ZoneInfo
 import streamlit as st
 
 from querido_diario.capitais import CAPITAIS, rotulo_municipio
+from querido_diario.tipos import Registro
+
+type EstadoExecucao = tuple[str, int | None, bool, Registro, str]
 
 ROOT = Path(__file__).resolve().parent
 # Não resolva o symlink: o caminho em .venv identifica o ambiente virtual.
@@ -25,15 +28,16 @@ MAX_MANIFEST = 5 * 1024 * 1024
 class Execucao:
     """Executa uma tarefa por vez e mantém o último relatório durante a sessão do servidor."""
 
-    def __init__(self):
+    def __init__(self) -> None:
+        """Cria a pasta temporária e o bloqueio compartilhado pelo servidor."""
         self.lock = Lock()
         self.pasta = tempfile.TemporaryDirectory(prefix="qd-painel-")
         self.raiz = Path(self.pasta.name)
-        self.processo = None
+        self.processo: subprocess.Popen[bytes] | None = None
         self.titulo = ""
         self.cancelada = False
 
-    def iniciar(self, titulo, argumentos, manifesto=None):
+    def iniciar(self, titulo: str, argumentos: list[str], manifesto: bytes | None = None) -> None:
         """Inicia a CLI sem shell, com a mesma configuração usada no terminal."""
         with self.lock:
             if self.processo and self.processo.poll() is None:
@@ -43,16 +47,21 @@ class Execucao:
                 path.write_bytes(manifesto)
                 argumentos = [*argumentos, "--manifesto", str(path)]
             python = PIPELINE_PYTHON if PIPELINE_PYTHON.is_file() else sys.executable
-            with (self.raiz / "resultado").open("wb") as saida, (self.raiz / "log").open("wb") as log:
+            with (
+                (self.raiz / "resultado").open("wb") as saida,
+                (self.raiz / "log").open("wb") as log,
+            ):
                 self.processo = subprocess.Popen(
                     [str(python), "-E", "-u", "-m", "querido_diario", *argumentos],
-                    cwd=ROOT, stdout=saida, stderr=log,
+                    cwd=ROOT,
+                    stdout=saida,
+                    stderr=log,
                     env={**os.environ, "QD_LOG_LEVEL": "INFO"},
                 )
             self.titulo = titulo
             self.cancelada = False
 
-    def cancelar(self):
+    def cancelar(self) -> None:
         """Interrompe o processo e deixa os dados já confirmados disponíveis."""
         with self.lock:
             if self.processo and self.processo.poll() is None:
@@ -62,7 +71,7 @@ class Execucao:
                     return
                 self.cancelada = True
 
-    def estado(self):
+    def estado(self) -> EstadoExecucao | None:
         """Retorna status, resumo JSON e o fim do log, sem carregar logs grandes."""
         with self.lock:
             if self.processo is None:
@@ -71,23 +80,25 @@ class Execucao:
             with (self.raiz / "log").open("rb") as log:
                 log.seek(max(0, os.fstat(log.fileno()).st_size - 16000))
                 mensagens = log.read().decode("utf-8", errors="replace")
-            resumo = {}
+            resumo: Registro = {}
             if codigo is not None:
                 bruto = (self.raiz / "resultado").read_text(encoding="utf-8", errors="replace")
                 try:
-                    resumo = json.loads(bruto)
+                    dados = json.loads(bruto)
+                    if isinstance(dados, dict):
+                        resumo = dados
                 except ValueError:
                     pass
             return self.titulo, codigo, self.cancelada, resumo, mensagens
 
 
 @st.cache_resource
-def executor():
+def executor() -> Execucao:
     """Compartilha a execução entre abas do mesmo servidor local."""
     return Execucao()
 
 
-def codigos(entrada, obrigatorio):
+def codigos(entrada: str, obrigatorio: bool) -> list[str]:
     """Aceita códigos IBGE separados por espaço, vírgula ou quebra de linha."""
     itens = list(dict.fromkeys(re.findall(r"[^\s,]+", entrada)))
     if obrigatorio and not itens:
@@ -97,29 +108,38 @@ def codigos(entrada, obrigatorio):
     return itens
 
 
-def datas(inicio, fim):
+def datas(inicio: date | None, fim: date | None) -> list[str]:
     """Converte datas opcionais para argumentos e valida a ordem do período."""
     if inicio and fim and inicio > fim:
         raise ValueError("A data inicial deve ser anterior ou igual à final.")
-    return [item for nome, valor in (("--inicio", inicio), ("--fim", fim))
-            if valor for item in (nome, valor.isoformat())]
+    return [
+        item
+        for nome, valor in (("--inicio", inicio), ("--fim", fim))
+        if valor
+        for item in (nome, valor.isoformat())
+    ]
 
 
-def coleta(painel, em_execucao):
+def coleta(painel: Execucao, em_execucao: bool) -> None:
     """Oferece coleta por municípios e datas ou por manifesto JSON."""
     origem = st.radio("Origem", ["Municípios e período", "Manifesto JSON"], horizontal=True)
     hoje = datetime.now(DATE_ZONE).date()
     with st.form("coleta"):
         if origem == "Municípios e período":
             capitais = st.multiselect(
-                "Capitais", options=list(CAPITAIS), format_func=rotulo_municipio,
+                "Capitais",
+                options=list(CAPITAIS),
+                format_func=rotulo_municipio,
                 placeholder="Busque pelo nome ou código IBGE",
             )
             municipios = st.text_input(
-                "Outros códigos IBGE (opcional)", placeholder="Ex.: 3509502",
+                "Outros códigos IBGE (opcional)",
+                placeholder="Ex.: 3509502",
             )
             esquerda, direita = st.columns(2)
-            inicio = esquerda.date_input("Data inicial", hoje - timedelta(days=6), format="DD/MM/YYYY")
+            inicio = esquerda.date_input(
+                "Data inicial", hoje - timedelta(days=6), format="DD/MM/YYYY"
+            )
             fim = direita.date_input("Data final", hoje, format="DD/MM/YYYY")
             arquivo = None
         else:
@@ -128,7 +148,8 @@ def coleta(painel, em_execucao):
         docling = st.checkbox("Extrair texto com Docling quando o TXT estiver indisponível")
         iniciar = st.form_submit_button("Iniciar coleta", type="primary", disabled=em_execucao)
         verificar = origem == "Municípios e período" and st.form_submit_button(
-            "Verificar cobertura", disabled=em_execucao,
+            "Verificar cobertura",
+            disabled=em_execucao,
         )
     if verificar:
         try:
@@ -166,7 +187,7 @@ def coleta(painel, em_execucao):
             st.rerun()
 
 
-def enviar_pdfs(painel, em_execucao):
+def enviar_pdfs(painel: Execucao, em_execucao: bool) -> None:
     """Permite reenviar os PDFs locais pendentes sem consultar a API de listagem."""
     st.write("Envie os PDFs já coletados que ainda aguardam uma cópia no bucket.")
     with st.form("envio"):
@@ -191,7 +212,7 @@ def enviar_pdfs(painel, em_execucao):
             st.rerun()
 
 
-def interface():
+def interface() -> None:
     """Renderiza os controles e acompanha a última tarefa com atualização periódica."""
     st.set_page_config(page_title="Querido Diário · Coleta", page_icon="📄", layout="centered")
     st.title("Querido Diário")
@@ -199,7 +220,8 @@ def interface():
     painel = executor()
 
     @st.fragment(run_every=1 if (estado := painel.estado()) and estado[1] is None else None)
-    def controles():
+    def controles() -> None:
+        """Atualiza formulários, status, cobertura e o log da última tarefa."""
         estado_atual = painel.estado()
         executando = bool(estado_atual and estado_atual[1] is None)
         if estado and estado[1] is None and not executando:
@@ -229,8 +251,10 @@ def interface():
             st.error("A execução falhou antes de gerar um resumo.")
         if "cobertura" in resumo:
             inicio = resumo["inicio"]
-            st.caption(f"Período consultado: {inicio} a {resumo['fim']}. "
-                       "As datas refletem o acervo do Querido Diário.")
+            st.caption(
+                f"Período consultado: {inicio} a {resumo['fim']}. "
+                "As datas refletem o acervo do Querido Diário."
+            )
             for row in resumo["cobertura"]:
                 st.markdown(f"**{rotulo_municipio(row['municipio_id'])}**")
                 ultima = row["ultima_publicacao"]
@@ -246,8 +270,11 @@ def interface():
                 for erro in row["erros"]:
                     st.error(erro)
         indicadores = [
-            ("edicoes", "Edições"), ("pdfs", "PDFs locais"), ("textos", "Textos"),
-            ("pdfs_no_storage", "PDFs no bucket"), ("falhas", "Falhas"),
+            ("edicoes", "Edições"),
+            ("pdfs", "PDFs locais"),
+            ("textos", "Textos"),
+            ("pdfs_no_storage", "PDFs no bucket"),
+            ("falhas", "Falhas"),
         ]
         visiveis = [(chave, label) for chave, label in indicadores if chave in resumo]
         if visiveis:

@@ -5,6 +5,7 @@ import logging
 import os
 import re
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 import boto3
@@ -12,6 +13,7 @@ from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 from . import banco
+from .tipos import Conexao
 
 LOG = logging.getLogger(__name__)
 AWS_VARS = ("AWS_ENDPOINT_URL_S3", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION")
@@ -25,13 +27,14 @@ def raiz_acervo() -> Path:
 class StoragePDF:
     """Envia um PDF sob uma chave determinística derivada de seu conteúdo."""
 
-    def __init__(self, client, endpoint: str, bucket: str):
+    def __init__(self, client: Any, endpoint: str, bucket: str) -> None:
+        """Recebe o cliente S3 dinâmico do boto3 ou um substituto para testes."""
         self.client = client
         self.endpoint = endpoint
         self.bucket = bucket
 
     @classmethod
-    def do_ambiente(cls, *, obrigatorio=False):
+    def do_ambiente(cls, *, obrigatorio: bool = False) -> "StoragePDF | None":
         """Usa o bucket explícito ou descobre o destino se houver um único bucket."""
         config = {nome: os.getenv(nome, "").strip() for nome in AWS_VARS}
         bucket = os.getenv("QD_STORAGE_BUCKET", "").strip()
@@ -42,25 +45,40 @@ class StoragePDF:
             raise ValueError("Configure o Object Storage: " + ", ".join(ausentes))
         endpoint = config["AWS_ENDPOINT_URL_S3"].rstrip("/")
         url = urlsplit(endpoint)
-        if url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment:
-            raise ValueError("AWS_ENDPOINT_URL_S3 deve ser um endpoint HTTPS sem credenciais ou parâmetros")
+        if (
+            url.scheme != "https"
+            or not url.hostname
+            or url.username
+            or url.password
+            or url.query
+            or url.fragment
+        ):
+            raise ValueError(
+                "AWS_ENDPOINT_URL_S3 deve ser um endpoint HTTPS sem credenciais ou parâmetros"
+            )
         client = boto3.client(
-            "s3", endpoint_url=endpoint, region_name=config["AWS_REGION"],
+            "s3",
+            endpoint_url=endpoint,
+            region_name=config["AWS_REGION"],
             aws_access_key_id=config["AWS_ACCESS_KEY_ID"],
             aws_secret_access_key=config["AWS_SECRET_ACCESS_KEY"],
             config=Config(
-                signature_version="s3v4", s3={"addressing_style": "path"},
+                signature_version="s3v4",
+                s3={"addressing_style": "path"},
                 request_checksum_calculation="when_required",
                 response_checksum_validation="when_required",
                 retries={"mode": "standard", "total_max_attempts": 4},
-                connect_timeout=10, read_timeout=60,
+                connect_timeout=10,
+                read_timeout=60,
             ),
         )
         if not bucket:
             try:
                 resposta = client.list_buckets()
             except ClientError as exc:
-                raise ValueError("Configure QD_STORAGE_BUCKET para evitar a descoberta de buckets") from exc
+                raise ValueError(
+                    "Configure QD_STORAGE_BUCKET para evitar a descoberta de buckets"
+                ) from exc
             buckets = resposta.get("Buckets", [])
             if len(buckets) != 1 or resposta.get("ContinuationToken"):
                 raise ValueError("Configure QD_STORAGE_BUCKET com o nome do bucket de destino")
@@ -68,19 +86,33 @@ class StoragePDF:
         return cls(client, endpoint, bucket)
 
     @property
-    def destino(self):
+    def destino(self) -> tuple[str, str]:
         """Retorna os campos que identificam o destino confirmado no Neon."""
         return self.endpoint, self.bucket
 
     def enviar(self, path: Path, checksum: str) -> str:
-        """Confere o arquivo local e reaproveita objetos idênticos em retentativas."""
+        """Confere o arquivo local e reaproveita objetos idênticos em retentativas.
+
+        Args:
+            path: PDF local que será lido e enviado.
+            checksum: SHA-256 esperado, em hexadecimal minúsculo.
+
+        Returns:
+            Chave S3 após upload bem-sucedido ou confirmação de objeto compatível.
+
+        Raises:
+            ValueError: Hash local inválido ou objeto remoto com metadados divergentes.
+            OSError: Falha ao abrir ou ler o PDF.
+            ClientError: A consulta ou gravação no bucket foi rejeitada.
+            BotoCoreError: Falha de transporte ou configuração do cliente S3.
+        """
         if not re.fullmatch(r"[0-9a-f]{64}", checksum or ""):
             raise ValueError("SHA-256 inválido para o PDF")
         key = f"querido-diario/pdf/{checksum[:2]}/{checksum}.pdf"
         with path.open("rb") as arquivo:
             if hashlib.file_digest(arquivo, "sha256").hexdigest() != checksum:
                 raise ValueError("O PDF local não corresponde ao SHA-256 registrado")
-            tamanho = arquivo.tell()
+            tamanho = os.fstat(arquivo.fileno()).st_size
             arquivo.seek(0)
             try:
                 remoto = self.client.head_object(Bucket=self.bucket, Key=key)
@@ -89,17 +121,26 @@ class StoragePDF:
                 if status != 404:
                     raise
             else:
-                if remoto["ContentLength"] != tamanho or remoto.get("Metadata", {}).get("sha256") != checksum:
-                    raise ValueError("O objeto existente tem tamanho ou SHA-256 diferente do PDF local")
+                if (
+                    remoto["ContentLength"] != tamanho
+                    or remoto.get("Metadata", {}).get("sha256") != checksum
+                ):
+                    raise ValueError(
+                        "O objeto existente tem tamanho ou SHA-256 diferente do PDF local"
+                    )
                 return key
             self.client.put_object(
-                Bucket=self.bucket, Key=key, Body=arquivo, ContentLength=tamanho,
-                ContentType="application/pdf", Metadata={"sha256": checksum},
+                Bucket=self.bucket,
+                Key=key,
+                Body=arquivo,
+                ContentLength=tamanho,
+                ContentType="application/pdf",
+                Metadata={"sha256": checksum},
             )
         return key
 
 
-def enviar_edicao(db, storage, raiz: Path, edicao_id: str) -> bool:
+def enviar_edicao(db: Conexao, storage: StoragePDF, raiz: Path, edicao_id: str) -> bool:
     """Confirma o upload após sucesso. Falhas deixam a edição disponível para reenvio."""
     try:
         with banco.exclusivo(db, "edicao:" + edicao_id):
@@ -108,8 +149,10 @@ def enviar_edicao(db, storage, raiz: Path, edicao_id: str) -> bool:
                 return False
             endpoint, bucket = storage.destino
             if (
-                row["pdf_storage_endpoint"] == endpoint and row["pdf_storage_bucket"] == bucket
-                and row["pdf_storage_key"] and row["pdf_storage_sha256"] == row["original_sha256"]
+                row["pdf_storage_endpoint"] == endpoint
+                and row["pdf_storage_bucket"] == bucket
+                and row["pdf_storage_key"]
+                and row["pdf_storage_sha256"] == row["original_sha256"]
             ):
                 return True
             if not row["original_caminho"]:
@@ -123,5 +166,7 @@ def enviar_edicao(db, storage, raiz: Path, edicao_id: str) -> bool:
             return True
     except (BotoCoreError, ClientError, OSError, ValueError, RuntimeError) as exc:
         codigo = exc.response.get("Error", {}).get("Code") if isinstance(exc, ClientError) else None
-        LOG.error("PDF da edição %s não enviado ao bucket (%s).", edicao_id, codigo or type(exc).__name__)
+        LOG.error(
+            "PDF da edição %s não enviado ao bucket (%s).", edicao_id, codigo or type(exc).__name__
+        )
         return False

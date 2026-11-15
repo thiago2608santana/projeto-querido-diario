@@ -3,7 +3,7 @@
 Fonte: https://www.ibge.gov.br/explica/codigos-dos-municipios.php
 """
 
-CAPITAIS = {
+CAPITAIS: dict[str, str] = {
     "2800308": "Aracaju (SE)",
     "1501402": "Belém (PA)",
     "3106200": "Belo Horizonte (MG)",

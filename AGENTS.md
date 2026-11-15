@@ -30,3 +30,13 @@
 - Se alterar dependências, atualize o `uv.lock` junto com o `pyproject.toml`.
 - Se alterar comandos, esquema ou fluxo operacional, atualize o README.
 - Consulte o [dicionário de dados](docs/dicionario-de-dados.md) antes de alterar consultas ou persistência. Ao mudar colunas, tipos, restrições ou relacionamentos, atualize o dicionário junto com o esquema.
+
+## Padrões de código
+
+- Anote parâmetros e retornos de todas as funções, inclusive privadas, internas e testes. Use `-> None` quando não houver retorno; `self` e `cls` dispensam anotação.
+- Mantenha docstrings em português nos módulos, classes e funções. Use uma frase curta para funções simples; acrescente `Args`, `Returns`, `Yields` e `Raises` quando houver contratos, efeitos persistentes, restrições ou erros relevantes. Não repita os tipos já presentes na assinatura.
+- Reutilize os contratos em `querido_diario/tipos.py`: `EdicaoFonte`, `Recorte`, resumos e conexão. Restrinja `Any` às fronteiras dinâmicas de SDKs e registros SQL/JSON, com justificativa. Type hints não validam a entrada em tempo de execução.
+- Valide o manifesto antes de preparar o esquema ou o storage e valide cada edição antes do download. Preserve campos desconhecidos nos metadados; uma edição inválida não deve impedir as demais.
+- Reutilize um arquivo local somente após verificar seu SHA-256 e sua localização dentro do acervo. Mudanças no algoritmo de divisão ou na chave de identidade exigem estratégia explícita de migração/reindexação.
+- Use a configuração de Ruff e mypy em `pyproject.toml`. Os comandos reproduzíveis estão na seção de qualidade do README. O teste `test_padronizacao.py` também verifica docstrings e anotações sem ferramentas adicionais.
+- Ao corrigir falhas de coleta, paginação, storage ou indexação, acrescente testes de regressão com serviços simulados. Consulte [a revisão técnica](docs/revisao-tecnica.md) para conhecer os limites já identificados.
