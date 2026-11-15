@@ -1,11 +1,15 @@
 """Persistência no Neon e busca lexical dos trechos em português."""
 
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from datetime import date
 from pathlib import Path
 
 import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
+
+from .tipos import Conexao, Recorte, Registro, Trecho
 
 SCHEMA = Path(__file__).with_name("schema.sql")
 REFERENCIA = """
@@ -17,36 +21,60 @@ REFERENCIA = """
 """
 
 
-def conectar(dsn: str):
+def conectar(dsn: str) -> Conexao:
     """Aceita URLs do Neon e o prefixo postgres do dialeto Psycopg no SQLAlchemy."""
     dsn = dsn.replace("postgresql+psycopg://", "postgresql://", 1)
     return psycopg.connect(dsn, connect_timeout=15, autocommit=True, row_factory=dict_row)
 
 
-def iniciar(db):
+def iniciar(db: Conexao) -> None:
     """Cria as tabelas em uma transação, sem tocar em outros esquemas."""
     with db.transaction():
         db.execute(SCHEMA.read_text(encoding="utf-8"), prepare=False)
 
 
 @contextmanager
-def exclusivo(db, tarefa: str):
-    """Mantém um bloqueio transacional, compatível com o pooler do Neon."""
+def exclusivo(db: Conexao, tarefa: str) -> Iterator[None]:
+    """Mantém um bloqueio transacional, compatível com o pooler do Neon.
+
+    Args:
+        db: Conexão usada também nas operações protegidas pelo bloqueio.
+        tarefa: Identidade da edição ou perfil que não deve executar em paralelo.
+
+    Yields:
+        Controle ao bloco protegido; confirma a transação ao sair sem erro.
+
+    Raises:
+        RuntimeError: Outra transação já possui o bloqueio. Não aguarda sua liberação.
+        psycopg.Error: Falha no banco; a transação é revertida ao sair com erro.
+    """
     with db.transaction():
         row = db.execute(
             "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0)) AS adquirido",
             ("querido_diario:" + tarefa,),
         ).fetchone()
-        if not row["adquirido"]:
+        if not row or not row["adquirido"]:
             raise RuntimeError("Já existe uma execução concorrente para este item")
         yield
 
 
-def salvar(db, registro: dict, trechos):
-    """Atualiza metadados e substitui trechos na mesma transação quando necessário."""
+def salvar(db: Conexao, registro: Registro, trechos: Sequence[Trecho] | None) -> None:
+    """Atualiza metadados e substitui trechos na mesma transação quando necessário.
+
+    Args:
+        db: Conexão com o esquema já preparado.
+        registro: Colunas da edição, incluindo metadados serializáveis em JSONB.
+        trechos: Novos trechos ordenados; ``None`` preserva os existentes e uma
+            sequência vazia os remove. A troca elimina confirmações de vetores
+            no Neon por cascata, mas não remove vetores remotos do Pinecone.
+
+    Raises:
+        psycopg.Error: Falha de persistência; metadados e trechos são revertidos juntos.
+    """
     valores = {**registro, "metadados": Jsonb(registro["metadados"])}
     with db.transaction():
-        db.execute("""
+        db.execute(
+            """
             INSERT INTO querido_diario.edicoes (
                 id, municipio_id, municipio, uf, publicada_em, coletada_na_fonte_em,
                 numero, extra, checksum_fonte, url_original, url_texto, metadados,
@@ -69,17 +97,22 @@ def salvar(db, registro: dict, trechos):
                 original_bytes = EXCLUDED.original_bytes, texto_sha256 = EXCLUDED.texto_sha256,
                 texto_caminho = EXCLUDED.texto_caminho, texto_origem = EXCLUDED.texto_origem,
                 atualizada_em = now()
-        """, valores)
+        """,
+            valores,
+        )
         if trechos is not None:
             db.execute("DELETE FROM querido_diario.trechos WHERE edicao_id = %s", (registro["id"],))
             with db.cursor() as cursor:
-                cursor.executemany("""
+                cursor.executemany(
+                    """
                     INSERT INTO querido_diario.trechos (id, edicao_id, ordem, texto)
                     VALUES (%s, %s, %s, %s)
-                """, trechos)
+                """,
+                    trechos,
+                )
 
 
-def filtros(municipio, inicio, fim):
+def filtros(municipio: str | None, inicio: date | None, fim: date | None) -> Recorte:
     """Fornece filtros tipados compartilhados entre busca lexical e vetorial."""
     return {"municipio": municipio, "inicio": inicio, "fim": fim}
 
@@ -91,9 +124,10 @@ RECORTE = """
 """
 
 
-def lexical(db, consulta: str, recorte: dict, limite: int):
+def lexical(db: Conexao, consulta: str, recorte: Recorte, limite: int) -> list[Registro]:
     """Classifica com ts_rank_cd e extrai evidência só dos resultados finais."""
-    return db.execute(f"""
+    return db.execute(
+        f"""
         WITH q AS (SELECT websearch_to_tsquery('pg_catalog.portuguese', %(consulta)s) AS termo),
         ranked AS MATERIALIZED (
             SELECT t.id, ts_rank_cd(t.busca, q.termo) AS score
@@ -107,69 +141,102 @@ def lexical(db, consulta: str, recorte: dict, limite: int):
         FROM ranked JOIN querido_diario.trechos t ON t.id = ranked.id
         JOIN querido_diario.edicoes e ON e.id = t.edicao_id CROSS JOIN q
         ORDER BY ranked.score DESC, e.publicada_em DESC, t.id
-    """, dict(recorte, consulta=consulta, limite=limite)).fetchall()
+    """,
+        dict(recorte, consulta=consulta, limite=limite),
+    ).fetchall()
 
 
-def recuperar(db, ids: list[str], recorte: dict):
+def recuperar(db: Conexao, ids: list[str], recorte: Recorte) -> dict[str, Registro]:
     """Recupera texto e citações no Neon e descarta IDs que já não existem."""
     if not ids:
         return {}
-    rows = db.execute(f"""
+    rows = db.execute(
+        f"""
         SELECT {REFERENCIA}, t.texto AS evidencia
         FROM querido_diario.trechos t JOIN querido_diario.edicoes e ON e.id = t.edicao_id
         WHERE t.id = ANY(%(ids)s) AND ({RECORTE})
-    """, dict(recorte, ids=ids)).fetchall()
+    """,
+        dict(recorte, ids=ids),
+    ).fetchall()
     return {row["trecho_id"]: row for row in rows}
 
 
-def pendentes(db, perfil: str, limite: int):
+def pendentes(db: Conexao, perfil: str, limite: int) -> list[Registro]:
     """Seleciona trechos que ainda não tiveram upsert confirmado neste perfil."""
-    return db.execute("""
+    return db.execute(
+        """
         SELECT t.id, t.texto, e.municipio_id, e.publicada_em
         FROM querido_diario.trechos t JOIN querido_diario.edicoes e ON e.id = t.edicao_id
         WHERE NOT EXISTS (SELECT 1 FROM querido_diario.vetores v
                           WHERE v.perfil = %s AND v.trecho_id = t.id)
         ORDER BY t.id LIMIT %s
-    """, (perfil, limite)).fetchall()
+    """,
+        (perfil, limite),
+    ).fetchall()
 
 
-def confirmar(db, perfil: str, ids: list[str]):
+def confirmar(db: Conexao, perfil: str, ids: list[str]) -> None:
     """Registra sucesso sem erro se um trecho tiver sido substituído neste intervalo."""
     with db.transaction(), db.cursor() as cursor:
-        cursor.executemany("""
+        cursor.executemany(
+            """
             INSERT INTO querido_diario.vetores (perfil, trecho_id)
             SELECT %s, id FROM querido_diario.trechos WHERE id = %s FOR KEY SHARE
             ON CONFLICT DO NOTHING
-        """, [(perfil, item) for item in ids])
+        """,
+            [(perfil, item) for item in ids],
+        )
 
 
-
-def pdf_para_envio(db, edicao_id):
+def pdf_para_envio(db: Conexao, edicao_id: str) -> Registro | None:
     """Busca a referência local e o estado da última cópia confirmada."""
-    return db.execute("""
+    return db.execute(
+        """
         SELECT pdf_disponivel, original_caminho, original_sha256, pdf_storage_endpoint,
                pdf_storage_bucket, pdf_storage_key, pdf_storage_sha256
         FROM querido_diario.edicoes WHERE id = %s
-    """, (edicao_id,)).fetchone()
+    """,
+        (edicao_id,),
+    ).fetchone()
 
 
-def pdfs_pendentes(db, endpoint, bucket, recorte, depois, limite):
+def pdfs_pendentes(
+    db: Conexao,
+    endpoint: str,
+    bucket: str,
+    recorte: Recorte,
+    depois: str,
+    limite: int,
+) -> list[Registro]:
     """Pagina por ID para que uma falha não impeça o envio das demais edições."""
-    return db.execute(f"""
+    return db.execute(
+        f"""
         SELECT e.id FROM querido_diario.edicoes e
         WHERE e.pdf_disponivel AND e.id > %(depois)s AND ({RECORTE})
           AND (e.pdf_storage_endpoint IS DISTINCT FROM %(endpoint)s
             OR e.pdf_storage_bucket IS DISTINCT FROM %(bucket)s OR e.pdf_storage_key IS NULL
             OR e.pdf_storage_sha256 IS DISTINCT FROM e.original_sha256)
         ORDER BY e.id LIMIT %(limite)s
-    """, dict(recorte, endpoint=endpoint, bucket=bucket, depois=depois, limite=limite)).fetchall()
+    """,
+        dict(recorte, endpoint=endpoint, bucket=bucket, depois=depois, limite=limite),
+    ).fetchall()
 
 
-def confirmar_pdf(db, edicao_id, endpoint, bucket, key, checksum):
+def confirmar_pdf(
+    db: Conexao,
+    edicao_id: str,
+    endpoint: str,
+    bucket: str,
+    key: str,
+    checksum: str,
+) -> None:
     """Registra a cópia somente após a confirmação pelo Object Storage."""
-    db.execute("""
+    db.execute(
+        """
         UPDATE querido_diario.edicoes
         SET pdf_storage_endpoint = %s, pdf_storage_bucket = %s, pdf_storage_key = %s,
             pdf_storage_sha256 = %s, pdf_storage_enviado_em = now()
         WHERE id = %s
-    """, (endpoint, bucket, key, checksum, edicao_id))
+    """,
+        (endpoint, bucket, key, checksum, edicao_id),
+    )

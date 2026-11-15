@@ -44,6 +44,41 @@ Execute os comandos abaixo a partir da raiz do projeto.
    `OLLAMA_EMBEDDING_MODEL` e deixe o serviço rodando com esse modelo disponível.
    O índice precisa ter a dimensão correspondente.
 
+## Painel local em Streamlit
+
+Na raiz do projeto, instale as dependências e abra o painel:
+
+```bash
+uv sync --locked
+uv run --locked python -m streamlit run app.py --server.address 127.0.0.1
+```
+
+Abra o endereço local indicado no terminal (normalmente
+`http://127.0.0.1:8501`). O painel usa o mesmo `.env` e acervo da CLI.
+Se um servidor já estava aberto, encerre-o com Ctrl+C e inicie novamente
+com o comando acima. O painel usa o Python do `.venv` do projeto para
+executar a CLI quando esse ambiente existe.
+
+- **Coletar edições** aceita seleção múltipla das 27 capitais por nome ou
+  código IBGE, códigos manuais para outros municípios e um período. Também aceita um manifesto JSON
+  de até 5 MB. Você pode habilitar Docling e o envio de PDFs ao bucket.
+- **Verificar cobertura** mostra o nome da capital quando conhecido, o código IBGE e a data da última publicação
+  disponível no Querido Diário e quantos registros a fonte lista no período.
+  Uma consulta válida com zero registros é exibida separadamente de erros HTTP
+  ou de conexão. A consulta usa apenas a API pública e não grava no Neon.
+  A data reflete o acervo da fonte, que pode estar defasado em relação à prefeitura.
+  Pela CLI: `uv run --locked python -m querido_diario cobertura --municipio 3550308 --inicio 2026-11-01 --fim 2026-11-14`.
+- **Enviar PDFs pendentes** copia os PDFs já coletados ao bucket, com filtros
+  opcionais de município e datas.
+- O painel mostra o registro durante a execução e o resumo ao final. Use
+  **Interromper execução** para parar a tarefa. Os dados confirmados continuam
+  disponíveis, e você pode repetir a operação para retomar o trabalho.
+
+O painel é local, sem autenticação, e executa uma tarefa de cada vez por
+servidor Streamlit. Deixe o servidor aberto durante a execução. O painel
+mantém apenas a última execução, em arquivos temporários, sem histórico
+persistente. A busca e a indexação no Pinecone continuam disponíveis na CLI.
+
 ## Coletar edições
 
 Exemplo com Campinas (código IBGE 3509502). As datas são inclusivas e podem ser
@@ -71,6 +106,9 @@ Se a API de listagem estiver fora do ar, você pode importar um resultado de
 `uv run --locked python -m querido_diario sync --manifesto edicoes.json`.
 O arquivo deve conter a lista `gazettes` do JSON da API, e o download ainda
 depende de os links de arquivo estarem acessíveis.
+O limite do manifesto é 5 MiB, tanto na CLI quanto no painel. A estrutura é
+validada antes de preparar o esquema e o storage; registros inválidos são
+contabilizados como falhas sem impedir o processamento dos demais.
 
 Cada arquivo é identificado pelo SHA-256 dos bytes e gravado atomicamente em
 `QD_ACERVO/objetos/`. Um original identificado pelo cabeçalho PDF recebe extensão
@@ -78,6 +116,9 @@ Cada arquivo é identificado pelo SHA-256 dos bytes e gravado atomicamente em
 relativo ao acervo, além da URL remota. Faça backup da pasta `QD_ACERVO` se
 precisar preservar cópias locais. Se o arquivo mudar na fonte sem alteração
 no checksum ou na URL de identidade, remova a cópia local e sincronize de novo.
+Ao reutilizar arquivos, o pipeline confere o SHA-256 de PDFs e TXTs e rejeita
+caminhos fora do acervo. Arquivos corrompidos são baixados novamente. Essa
+verificação lê os arquivos locais e pode aumentar o tempo da sincronização.
 
 O texto do Querido Diário tem preferência. Com `--docling`, a coleta tenta
 extrair texto do PDF quando o TXT não está disponível. A primeira execução do
@@ -190,10 +231,40 @@ Consulte o [dicionário de dados](docs/dicionario-de-dados.md) para ver todas as
 | `querido_diario/banco.py` e `schema.sql` | Esquema, transações, persistência e busca lexical. |
 | `querido_diario/storage.py` | Upload idempotente de PDFs e confirmação da referência remota. |
 | `querido_diario/vetores.py` | Embeddings, indexação, recuperação e fusão de resultados. |
+| `querido_diario/tipos.py` | Contratos de edições, filtros, resultados e conexão com o banco. |
+| `querido_diario/capitais.py` | Catálogo local das capitais e rótulos para seleção no painel. |
+| `app.py` | Interface Streamlit e controle do subprocesso da CLI. |
 
 Valide a instalação com `uv run --locked python -m querido_diario --help`.
 Para executar os testes sem serviços externos, rode
 `uv run --locked python -m unittest discover -s tests -v`.
+
+## Padrões e verificações de qualidade
+
+Todas as funções, inclusive auxiliares privadas e testes, têm type hints e
+docstrings em português. Funções simples usam uma descrição curta; funções
+com contratos mais complexos documentam entradas, retornos, efeitos e erros.
+Os contratos compartilhados ficam em `tipos.py`. Dados externos ainda precisam
+ser validados em tempo de execução: type hints não validam o JSON recebido.
+
+O `pyproject.toml` configura Ruff e mypy. Para executar as mesmas versões usadas
+na revisão, com ferramentas isoladas do ambiente do pipeline:
+
+```bash
+uvx --from ruff==0.12.0 ruff check app.py querido_diario tests
+uvx --from ruff==0.12.0 ruff format --check app.py querido_diario tests
+uvx --from mypy==1.17.1 mypy --python-executable .venv/bin/python
+uv run --locked python -m unittest discover -s tests -v
+```
+
+A primeira execução de `uvx` pode baixar as ferramentas. O mypy utiliza o Python
+do projeto para localizar dependências e verifica os módulos de produção; Ruff
+e os testes de padronização também cobrem os testes. Não é necessário alterar
+as dependências do pipeline para executar essas ferramentas.
+
+Os testes não acessam banco, bucket ou provedores de IA. Consulte a
+[revisão técnica](docs/revisao-tecnica.md) para conhecer as falhas corrigidas,
+o alcance da validação e as limitações operacionais.
 
 Fonte dos dados: [Querido Diário, da Open Knowledge Brasil](https://queridodiario.org.br/sobre).
 Consulte a [documentação da API pública](https://docs.queridodiario.ok.org.br/pt-br/latest/utilizando/api-publica.html)

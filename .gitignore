@@ -14,3 +14,7 @@ wheels/
 .env.*
 /data/acervo/
 .DS_Store
+
+# Ferramentas locais de qualidade
+.mypy_cache/
+.ruff_cache/
