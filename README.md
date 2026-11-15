@@ -44,6 +44,40 @@ Execute os comandos abaixo a partir da raiz do projeto.
    `OLLAMA_EMBEDDING_MODEL` e deixe o serviço rodando com esse modelo disponível.
    O índice precisa ter a dimensão correspondente.
 
+## Painel local em Streamlit
+
+Na raiz do projeto, instale as dependências e abra o painel:
+
+```bash
+uv sync --locked
+uv run --locked python -m streamlit run app.py --server.address 127.0.0.1
+```
+
+Abra o endereço local indicado no terminal (normalmente
+`http://127.0.0.1:8501`). O painel usa o mesmo `.env` e acervo da CLI.
+Se um servidor já estava aberto, encerre-o com Ctrl+C e inicie novamente
+com o comando acima. O painel usa o Python do `.venv` do projeto para
+executar a CLI quando esse ambiente existe.
+
+- **Coletar edições** aceita códigos IBGE e um período, ou um manifesto JSON
+  de até 5 MB. Você pode habilitar Docling e o envio de PDFs ao bucket.
+- **Verificar cobertura** mostra, por código IBGE, a data da última publicação
+  disponível no Querido Diário e quantos registros a fonte lista no período.
+  Uma consulta válida com zero registros é exibida separadamente de erros HTTP
+  ou de conexão. A consulta usa apenas a API pública e não grava no Neon.
+  A data reflete o acervo da fonte, que pode estar defasado em relação à prefeitura.
+  Pela CLI: `uv run --locked python -m querido_diario cobertura --municipio 3550308 --inicio 2026-11-01 --fim 2026-11-14`.
+- **Enviar PDFs pendentes** copia os PDFs já coletados ao bucket, com filtros
+  opcionais de município e datas.
+- O painel mostra o registro durante a execução e o resumo ao final. Use
+  **Interromper execução** para parar a tarefa. Os dados confirmados continuam
+  disponíveis, e você pode repetir a operação para retomar o trabalho.
+
+O painel é local, sem autenticação, e executa uma tarefa de cada vez por
+servidor Streamlit. Deixe o servidor aberto durante a execução. O painel
+mantém apenas a última execução, em arquivos temporários, sem histórico
+persistente. A busca e a indexação no Pinecone continuam disponíveis na CLI.
+
 ## Coletar edições
 
 Exemplo com Campinas (código IBGE 3509502). As datas são inclusivas e podem ser

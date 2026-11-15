@@ -15,6 +15,7 @@ dependencies = [
     "python-dotenv",
     "sentence-transformers",
     "sqlalchemy>=2.1.8",
+    "streamlit>=1.37",
     "transformers",
 ]
 

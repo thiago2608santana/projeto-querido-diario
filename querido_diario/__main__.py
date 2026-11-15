@@ -14,7 +14,7 @@ import psycopg
 from dotenv import load_dotenv
 
 from . import banco, coleta
-from .fonte import DEFAULT_API, Fonte
+from .fonte import DEFAULT_API, ErroListagem, Fonte
 from .storage import StoragePDF, enviar_edicao, raiz_acervo
 from .vetores import BuscaVetorial, combinar, exigir
 
@@ -53,6 +53,10 @@ def argumentos():
     sync.add_argument("--pagina", type=inteiro(1, 50), default=25)
     sync.add_argument("--docling", action="store_true", help="Extrair texto quando o TXT não está disponível")
     sync.add_argument("--sem-storage", action="store_true", help="Coletar sem copiar PDFs ao bucket")
+    cobertura = sub.add_parser("cobertura", help="Consultar atualização e registros na fonte")
+    cobertura.add_argument("--municipio", type=municipio, action="append", required=True)
+    cobertura.add_argument("--inicio", type=date.fromisoformat, required=True)
+    cobertura.add_argument("--fim", type=date.fromisoformat, required=True)
     envio = sub.add_parser("enviar-pdfs", help="Copiar PDFs pendentes do acervo local ao bucket")
     envio.add_argument("--municipio", type=municipio)
     envio.add_argument("--inicio", type=date.fromisoformat)
@@ -72,6 +76,26 @@ def argumentos():
     return parser.parse_args()
 
 
+def intervalo_api():
+    """Respeita o mesmo limite de taxa na consulta de cobertura e na coleta."""
+    taxa = float(os.getenv("QD_REQUISICOES_POR_MINUTO", "45"))
+    if not 1 <= taxa <= 60:
+        raise ValueError("QD_REQUISICOES_POR_MINUTO deve estar entre 1 e 60")
+    return 60 / taxa
+
+
+def cobertura(args):
+    """Consulta exclusivamente a fonte pública, sem depender do Neon."""
+    if args.inicio > args.fim:
+        raise ValueError("A data inicial deve ser igual ou anterior à final")
+    with httpx.Client(timeout=httpx.Timeout(15, connect=8)) as http:
+        fonte = Fonte(http, os.getenv("QD_API_URL", DEFAULT_API), intervalo_api())
+        resultados = [fonte.cobertura(codigo, args.inicio, args.fim)
+                      for codigo in dict.fromkeys(args.municipio)]
+    return {"inicio": args.inicio, "fim": args.fim, "cobertura": resultados,
+            "falhas": sum(bool(row["erros"]) for row in resultados)}
+
+
 def sync(db, args):
     """Sincroniza recortes, preservando edições já gravadas em caso de interrupção."""
     fim = args.fim or datetime.now(ZoneInfo("America/Sao_Paulo")).date()
@@ -81,9 +105,7 @@ def sync(db, args):
     raiz = raiz_acervo()
     storage = None if args.sem_storage else StoragePDF.do_ambiente()
     hosts = os.getenv("QD_HOSTS_ARQUIVOS", "").split()
-    taxa = float(os.getenv("QD_REQUISICOES_POR_MINUTO", "45"))
-    if not 1 <= taxa <= 60:
-        raise ValueError("QD_REQUISICOES_POR_MINUTO deve estar entre 1 e 60")
+    intervalo = intervalo_api()
     converter = None
     if args.docling:
         from docling.document_converter import DocumentConverter
@@ -96,7 +118,7 @@ def sync(db, args):
         resumo.update(inicio=inicio, fim=fim)
     banco.iniciar(db)
     with httpx.Client(timeout=httpx.Timeout(45, connect=10), follow_redirects=False) as http:
-        fonte = Fonte(http, os.getenv("QD_API_URL", DEFAULT_API), 60 / taxa, hosts)
+        fonte = Fonte(http, os.getenv("QD_API_URL", DEFAULT_API), intervalo, hosts)
         if args.manifesto:
             if args.inicio or args.fim:
                 raise ValueError("Use o manifesto com o recorte já selecionado")
@@ -107,8 +129,12 @@ def sync(db, args):
         else:
             for codigo in dict.fromkeys(args.municipio):
                 try:
+                    LOG.info("Consultando município %s de %s a %s.", codigo, inicio, fim)
                     rows = fonte.edicoes(codigo, inicio, fim, args.pagina)
                     _processar(db, fonte, raiz, rows, converter, resumo, storage)
+                except ErroListagem as exc:
+                    LOG.error("Não foi possível listar as edições de %s.", exc)
+                    resumo["falhas"] += 1
                 except (httpx.HTTPError, KeyError, ValueError) as exc:
                     LOG.error("Não foi possível listar as edições de %s (%s).",
                               codigo, type(exc).__name__)
@@ -132,6 +158,8 @@ def _processar(db, fonte, raiz, rows, converter, resumo, storage):
                 falha_storage = not enviado
                 resumo["falhas_storage"] += falha_storage
             resumo["falhas"] += bool(result["falhas"]) or falha_storage
+            LOG.info("Edição de %s processada (%s). Total: %s.",
+                     row["territory_id"], row["date"], resumo["edicoes"])
         except (KeyError, TypeError, ValueError, RuntimeError, OSError) as exc:
             LOG.error("Uma edição não pôde ser processada (%s).", type(exc).__name__)
             resumo["falhas"] += 1
@@ -158,6 +186,8 @@ def enviar_pdfs(db, args):
             enviado = enviar_edicao(db, storage, raiz, cursor)
             resumo["pdfs_no_storage"] += enviado
             resumo["falhas"] += not enviado
+            LOG.info("Envio de PDFs: %s confirmados, %s falhas.",
+                     resumo["pdfs_no_storage"], resumo["falhas"])
     return resumo
 
 
@@ -185,26 +215,31 @@ def main():
     """Mantém resultados no stdout e erros no stderr, sem expor o DSN."""
     args = argumentos()
     load_dotenv(Path.cwd() / ".env", override=False)
+    nivel = logging.INFO if os.getenv("QD_LOG_LEVEL") == "INFO" else logging.WARNING
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
+    LOG.setLevel(nivel)
     try:
-        with banco.conectar(exigir("DATABASE_URL")) as db:
-            if args.comando == "init":
-                banco.iniciar(db)
-                resultado = {"schema": "querido_diario"}
-            elif args.comando == "sync":
-                resultado = sync(db, args)
-            elif args.comando == "enviar-pdfs":
-                resultado = enviar_pdfs(db, args)
-            elif args.comando == "indexar":
-                resultado = {"indexados": BuscaVetorial().indexar(db, args.maximo)}
-            elif args.comando == "buscar":
-                resultado = buscar(db, args)
-            else:
-                resultado = db.execute(
-                    "SELECT * FROM querido_diario.edicoes WHERE id = %s", (args.id,)
-                ).fetchone()
+        if args.comando == "cobertura":
+            resultado = cobertura(args)
+        else:
+            with banco.conectar(exigir("DATABASE_URL")) as db:
+                if args.comando == "init":
+                    banco.iniciar(db)
+                    resultado = {"schema": "querido_diario"}
+                elif args.comando == "sync":
+                    resultado = sync(db, args)
+                elif args.comando == "enviar-pdfs":
+                    resultado = enviar_pdfs(db, args)
+                elif args.comando == "indexar":
+                    resultado = {"indexados": BuscaVetorial().indexar(db, args.maximo)}
+                elif args.comando == "buscar":
+                    resultado = buscar(db, args)
+                else:
+                    resultado = db.execute(
+                        "SELECT * FROM querido_diario.edicoes WHERE id = %s", (args.id,)
+                    ).fetchone()
         print(json.dumps(resultado, default=str, ensure_ascii=False, indent=2))
-        return int((args.comando in ("sync", "enviar-pdfs") and resultado["falhas"] > 0) or resultado is None)
+        return int((args.comando in ("sync", "enviar-pdfs", "cobertura") and resultado["falhas"] > 0) or resultado is None)
     except psycopg.Error as exc:
         LOG.error("Falha no Postgres (%s). Confira DATABASE_URL, permissões e se o esquema foi criado.",
                   exc.sqlstate or type(exc).__name__)

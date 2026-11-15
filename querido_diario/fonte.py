@@ -49,6 +49,17 @@ def _validate_url(url: str, hosts: set[str]) -> None:
         raise ValueError("URL fora dos hosts HTTPS autorizados para o Querido Diário")
 
 
+def motivo_http(exc: httpx.HTTPError) -> str:
+    """Resume o erro sem expor URL, parâmetros ou conteúdo da resposta."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"HTTP {exc.response.status_code}"
+    return type(exc).__name__
+
+
+class ErroListagem(RuntimeError):
+    """Identifica a página que falhou após as tentativas da API."""
+
+
 class Fonte:
     """Compartilha uma conexão e limita a taxa inclusive nas retentativas."""
 
@@ -88,13 +99,68 @@ class Fonte:
                         delay = max(delay, min(int(retry_after), 120))
                     with_response.close()
             except httpx.HTTPStatusError as exc:
+                motivo = motivo_http(exc)
                 if exc.response.status_code not in RETRY_CODES or attempt == 3:
                     raise
-            except httpx.TransportError:
+            except httpx.TransportError as exc:
+                motivo = motivo_http(exc)
                 if attempt == 3:
                     raise
-            LOG.warning("Falha HTTP transitória. Nova tentativa em %ss.", delay)
+            LOG.warning("Falha transitória (%s). Nova tentativa em %ss.", motivo, delay)
             time.sleep(delay)
+
+    def _pagina(self, params, *, contexto):
+        url = f"{self.base}/gazettes?{httpx.QueryParams(params)}"
+
+        def read_page(response):
+            response.read()
+            return response.json()
+
+        try:
+            data = self.consumir(url, self.api_hosts, read_page)
+        except httpx.HTTPError as exc:
+            raise ErroListagem(f"{contexto}: {motivo_http(exc)}") from exc
+        except ValueError as exc:
+            raise ErroListagem(f"{contexto}: resposta inválida da API") from exc
+        if not isinstance(data, dict):
+            raise ErroListagem(f"{contexto}: resposta inválida da API")
+        rows, total = data.get("gazettes"), data.get("total_gazettes")
+        if not isinstance(rows, list) or type(total) is not int or total < 0:
+            raise ErroListagem(f"{contexto}: resposta inválida da API")
+        return rows, total
+
+    def cobertura(self, municipio: str, inicio: date, fim: date) -> dict:
+        """Consulta a última publicação no acervo e a contagem do período."""
+        base = {"territory_ids": municipio, "sort_by": "descending_date", "size": 1}
+        resultado = {"municipio_id": municipio, "ultima_publicacao": None, "registros": None,
+                     "erros": []}
+        consultas = (
+            (base, "última publicação"),
+            (dict(base, published_since=inicio.isoformat(), published_until=fim.isoformat()),
+             "período selecionado"),
+        )
+        for params, etapa in consultas:
+            try:
+                rows, total = self._pagina(params, contexto=etapa)
+                if bool(rows) != bool(total):
+                    raise ErroListagem(f"{etapa}: resposta inconsistente da API")
+                if rows:
+                    row = rows[0]
+                    if str(row["territory_id"]) != municipio:
+                        raise ValueError("Município fora do recorte")
+                    publicada = date.fromisoformat(row["date"])
+                if etapa == "última publicação":
+                    if rows:
+                        resultado["ultima_publicacao"] = publicada.isoformat()
+                else:
+                    if rows and not inicio <= publicada <= fim:
+                        raise ValueError("Data fora do recorte")
+                    resultado["registros"] = total
+            except ErroListagem as exc:
+                resultado["erros"].append(str(exc))
+            except (KeyError, TypeError, ValueError):
+                resultado["erros"].append(f"{etapa}: resposta inválida da API")
+        return resultado
 
     def edicoes(self, municipio: str, inicio: date, fim: date, size: int):
         """Percorre janelas diárias para evitar offsets profundos e limitar reprocessamento."""
@@ -102,24 +168,12 @@ class Fonte:
         while dia <= fim:
             offset = 0
             while True:
-                params = httpx.QueryParams({
-                    "territory_ids": municipio,
-                    "published_since": dia.isoformat(),
-                    "published_until": dia.isoformat(),
-                    "sort_by": "ascending_date",
-                    "size": size,
-                    "offset": offset,
-                })
-                url = f"{self.base}/gazettes?{params}"
-
-                def read_page(response):
-                    response.read()
-                    return response.json()
-
-                data = self.consumir(url, self.api_hosts, read_page)
-                rows, total = data["gazettes"], data["total_gazettes"]
-                if not isinstance(rows, list) or not isinstance(total, int):
-                    raise ValueError("Resposta inesperada da API de edições")
+                rows, total = self._pagina(
+                    {"territory_ids": municipio, "published_since": dia.isoformat(),
+                     "published_until": dia.isoformat(), "sort_by": "ascending_date",
+                     "size": size, "offset": offset},
+                    contexto=f"{municipio} em {dia}, offset {offset}",
+                )
                 if not rows:
                     if offset < total:
                         raise ValueError(f"Paginação incompleta para {municipio} em {dia}")

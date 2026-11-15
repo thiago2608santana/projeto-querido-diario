@@ -14,6 +14,13 @@
 - Mantenha a busca lexical utilizável sem OpenAI, Ollama ou Pinecone. Preserve a saída JSON da CLI para outros programas e mande diagnósticos ao stderr.
 - Use `.env.example` para documentar configuração. Não exponha credenciais do `.env` em logs, exemplos ou commits. Nos testes locais, use arquivos temporários e clientes simulados.
 
+## Painel local
+
+- `app.py` é a interface Streamlit. Reutilize os comandos da CLI para executar a coleta e enviar PDFs. Mantenha a configuração no `.env` e os resultados da CLI em JSON.
+- Inicie com `uv run --locked python -m streamlit run app.py --server.address 127.0.0.1`.
+
+- A consulta de cobertura reutiliza a API pública, sem exigir acesso ao Neon. Diferencie resultados vazios de falhas da API.
+
 ## Validação
 
 - Testes locais: `uv run --locked python -m unittest discover -s tests -v`.
