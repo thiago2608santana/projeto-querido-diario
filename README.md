@@ -216,6 +216,42 @@ e ignora IDs antigos durante a recuperação. Esses vetores antigos podem
 permanecer no Pinecone até a manutenção do namespace. Se usar OpenAI, o comando
 `indexar` envia os trechos e a busca semântica envia a consulta à API de embeddings.
 
+## Resumir uma edição com GPT
+
+Use o TXT integral que o pipeline guardou no caminho `texto_caminho` dentro
+de `QD_ACERVO`. Isso preserva mais estrutura do que concatenar os trechos
+de busca, que têm espaços normalizados e sobreposição. Configure
+`OPENAI_API_KEY` no ambiente ou no `.env` e rode na raiz do projeto:
+
+```sh
+uv run --locked python -m tools.resumir_diario caminho/da/edicao.txt > resumo.json
+```
+
+A função `resumir_diario(texto)`, em `tools/resumir_diario.py`, aceita o
+conteúdo como `str`. Para chamá-la em um notebook, carregue o `.env` com
+`load_dotenv()` ou passe um cliente OpenAI já configurado. O modelo padrão
+é `gpt-4.1-mini`. Use `--modelo` ou `OPENAI_RESUMO_MODEL` para escolher
+outro GPT com suporte à API Responses e a Structured Outputs.
+
+O script identifica repetições de linhas inteiras com formatos conhecidos
+de rodapé. Use `--manter-rodapes` para desativar essa etapa. O GPT recebe
+instruções para ignorar entradas de sumário e preservar atos substantivos.
+O texto original é preservado no acervo.
+
+O fluxo divide o texto em blocos de até 16.000 bytes UTF-8 por padrão.
+O teto em bytes controla o volume enviado e funciona como margem conservadora,
+sem calcular a quantidade exata de tokens. Textos curtos exigem uma chamada.
+Para edições maiores, o GPT extrai candidatos por bloco e consolida os
+resultados em pares, selecionando os atos mais relevantes sem reescrever as
+evidências. `--max-blocos` limita o trabalho por edição. Se o texto exceder
+o limite, o script informa o erro antes de chamar a API.
+
+O JSON retorna até oito pontos com tema, descrição, citação e número do
+bloco processado. A citação é conferida no texto com espaços normalizados.
+Isso ajuda a localizar a evidência, mas a relação entre a descrição e a
+passagem ainda precisa de revisão humana quando a precisão é crítica.
+Atos partidos na fronteira entre blocos podem perder contexto.
+
 ## Tabelas e código
 
 Consulte o [dicionário de dados](docs/dicionario-de-dados.md) para ver todas as colunas do Neon, seus tipos, chaves e relacionamentos.
