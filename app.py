@@ -13,6 +13,8 @@ from zoneinfo import ZoneInfo
 
 import streamlit as st
 
+from querido_diario.capitais import CAPITAIS, rotulo_municipio
+
 ROOT = Path(__file__).resolve().parent
 # Não resolva o symlink: o caminho em .venv identifica o ambiente virtual.
 PIPELINE_PYTHON = ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
@@ -109,7 +111,13 @@ def coleta(painel, em_execucao):
     hoje = datetime.now(DATE_ZONE).date()
     with st.form("coleta"):
         if origem == "Municípios e período":
-            municipios = st.text_input("Códigos IBGE", placeholder="Ex.: 5208707, 3509502")
+            capitais = st.multiselect(
+                "Capitais", options=list(CAPITAIS), format_func=rotulo_municipio,
+                placeholder="Busque pelo nome ou código IBGE",
+            )
+            municipios = st.text_input(
+                "Outros códigos IBGE (opcional)", placeholder="Ex.: 3509502",
+            )
             esquerda, direita = st.columns(2)
             inicio = esquerda.date_input("Data inicial", hoje - timedelta(days=6), format="DD/MM/YYYY")
             fim = direita.date_input("Data final", hoje, format="DD/MM/YYYY")
@@ -125,7 +133,7 @@ def coleta(painel, em_execucao):
     if verificar:
         try:
             argumentos = ["cobertura", *datas(inicio, fim)]
-            for codigo in codigos(municipios, True):
+            for codigo in codigos(" ".join([*capitais, municipios]), True):
                 argumentos.extend(["--municipio", codigo])
             painel.iniciar("Cobertura no Querido Diário", argumentos)
         except (ValueError, OSError) as exc:
@@ -141,7 +149,7 @@ def coleta(painel, em_execucao):
                 argumentos.append("--docling")
             manifesto = None
             if origem == "Municípios e período":
-                for codigo in codigos(municipios, True):
+                for codigo in codigos(" ".join([*capitais, municipios]), True):
                     argumentos.extend(["--municipio", codigo])
                 argumentos.extend(datas(inicio, fim))
             else:
@@ -224,7 +232,7 @@ def interface():
             st.caption(f"Período consultado: {inicio} a {resumo['fim']}. "
                        "As datas refletem o acervo do Querido Diário.")
             for row in resumo["cobertura"]:
-                st.markdown(f"**IBGE {row['municipio_id']}**")
+                st.markdown(f"**{rotulo_municipio(row['municipio_id'])}**")
                 ultima = row["ultima_publicacao"]
                 registros = row["registros"]
                 if ultima:

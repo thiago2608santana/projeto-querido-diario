@@ -21,6 +21,8 @@
 
 - A consulta de cobertura reutiliza a API pública, sem exigir acesso ao Neon. Diferencie resultados vazios de falhas da API.
 
+- Mantenha a lista local das 27 capitais e seus códigos IBGE em `querido_diario/capitais.py`. O painel combina a seleção com os códigos manuais, remove duplicatas e usa a mesma lista de municípios para verificar cobertura ou iniciar a coleta. Nos resultados de cobertura, mostre o nome e a UF das capitais junto ao código IBGE.
+
 ## Validação
 
 - Testes locais: `uv run --locked python -m unittest discover -s tests -v`.

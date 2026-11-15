@@ -59,9 +59,10 @@ Se um servidor já estava aberto, encerre-o com Ctrl+C e inicie novamente
 com o comando acima. O painel usa o Python do `.venv` do projeto para
 executar a CLI quando esse ambiente existe.
 
-- **Coletar edições** aceita códigos IBGE e um período, ou um manifesto JSON
+- **Coletar edições** aceita seleção múltipla das 27 capitais por nome ou
+  código IBGE, códigos manuais para outros municípios e um período. Também aceita um manifesto JSON
   de até 5 MB. Você pode habilitar Docling e o envio de PDFs ao bucket.
-- **Verificar cobertura** mostra, por código IBGE, a data da última publicação
+- **Verificar cobertura** mostra o nome da capital quando conhecido, o código IBGE e a data da última publicação
   disponível no Querido Diário e quantos registros a fonte lista no período.
   Uma consulta válida com zero registros é exibida separadamente de erros HTTP
   ou de conexão. A consulta usa apenas a API pública e não grava no Neon.
